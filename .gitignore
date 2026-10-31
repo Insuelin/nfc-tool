@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 *.mfd
 *.bin
+
+# external crack tools: built from tools/src, never committed
+tools/src/
+tools/bin/
