@@ -18,6 +18,7 @@ class WriteReport:
     block: int
     ok: bool
     note: str = ""
+    skipped: bool = False  # no key for this sector, so nothing was attempted
 
 
 def _auth(pn532: PN532, card: Card, sector: int, keys: dict[int, mifare.SectorKey]) -> bool:
@@ -60,7 +61,7 @@ def write_block0_gen1a(pn532: PN532, card: Card, data: bytes) -> tuple[bool, str
         return False, f"写块失败: {exc}"
     if status != 0x00:
         return False, f"写块状态 0x{status:02X}"
-    return True, "Gen1A 后门写入完成"
+    return True, "已改写(Gen1A 后门)"
 
 
 def write_block0_gen2(pn532: PN532, card: Card,
@@ -73,7 +74,7 @@ def write_block0_gen2(pn532: PN532, card: Card,
         ok = pn532.write_block(card.target, 0, data)
     except PN532Error as exc:
         return False, f"写块失败: {exc}"
-    return (True, "普通写入完成") if ok else (False, "卡片拒绝写入")
+    return (True, "已改写(普通认证写入)") if ok else (False, "卡片拒绝写入块 0")
 
 
 def verify_block(pn532: PN532, card: Card, block: int,
@@ -89,32 +90,75 @@ def verify_block(pn532: PN532, card: Card, block: int,
         return False
 
 
+def verify_trailer(pn532: PN532, card: Card, sector: int, trailer: bytes) -> bool:
+    """Read a sector trailer back using the keys that were just written."""
+    geo = card.geometry
+    assert geo is not None
+    block = geo.trailer_block(sector)
+    for key_type, key in ((KEY_A, trailer[0:6]), (KEY_B, trailer[10:16])):
+        if key == b"\x00" * 6:
+            continue
+        if not mifare.try_key(pn532, card, block, key, key_type):
+            continue
+        try:
+            return pn532.read_block(card.target, block) == trailer
+        except PN532Error:
+            return False
+    return False
+
+
 def check_access_bits(trailer: bytes) -> str | None:
-    """Return an error string when the trailer access bits are inconsistent."""
+    """Return an error string when the trailer access bits are inconsistent.
+
+    Bytes 6-8 store the three access conditions C1/C2/C3 together with their
+    complements:
+
+        byte 6 = ~C2 (high nibble) | ~C1 (low nibble)
+        byte 7 =  C1 (high nibble) | ~C3 (low nibble)
+        byte 8 =  C3 (high nibble) |  C2 (low nibble)
+
+    A normal factory trailer (FF 07 80 69) decodes to C1=C2=0, C3=1000.
+    """
     if len(trailer) != 16:
         return "trailer 长度不是 16"
-    bits = trailer[6:10]
-    if (bits[0] & 0x0F) != ((~bits[1]) & 0x0F):
-        return "访问位: 高半字节与反码不一致"
-    if (bits[2] & 0x0F) != ((~bits[3]) & 0x0F):
-        return "访问位: 低半字节与反码不一致"
+    b6, b7, b8 = trailer[6], trailer[7], trailer[8]
+    if (b6 >> 4) != ((b8 & 0x0F) ^ 0x0F):
+        return "访问位: C2 与反码不一致"
+    if (b6 & 0x0F) != ((b7 >> 4) ^ 0x0F):
+        return "访问位: C1 与反码不一致"
+    if (b7 & 0x0F) != ((b8 >> 4) ^ 0x0F):
+        return "访问位: C3 与反码不一致"
     return None
 
 
 def write_card(pn532: PN532, card: Card, dump: bytes,
                keys: list[mifare.SectorKey], *,
                write_uid: bool, magic: str | None,
+               write_trailers: bool = False,
                progress=None) -> list[WriteReport]:
     """Restore a dump onto the card.
 
     magic is "gen1a", "gen2" or None. Block 0 is only touched when write_uid
-    is set and the card is known to be magic.
+    is set and the card is known to be magic. Sector trailers (which hold
+    Key A/B and the access bits) are skipped unless write_trailers is set:
+    writing them would re-key the target card and can lock a sector whose
+    access bits disagree with the hardware.
     """
     geo = card.geometry
     if geo is None:
         raise ValueError("不支持的卡型")
     if len(dump) != geo.total_blocks * 16:
         raise ValueError(f"dump 长度 {len(dump)} 与卡容量 {geo.total_blocks*16} 不符")
+
+    # Never write onto a card the user did not confirm.
+    info = pn532.list_passive()
+    if not info:
+        raise RuntimeError("写入前找不到卡片,请把目标卡放回读卡器")
+    if info["uid"] != card.uid:
+        raise RuntimeError(
+            f"现在放的不是刚才确认的那张卡:当前 UID {info['uid'].hex().upper()},"
+            f"确认的是 {card.uid.hex().upper()}")
+    card.target = info["target"]
 
     by_sector = {k.sector: k for k in keys}
     reports: list[WriteReport] = []
@@ -126,6 +170,10 @@ def write_card(pn532: PN532, card: Card, dump: bytes,
         else:
             ok, note = write_block0_gen2(pn532, card, by_sector, block0)
         if ok:
+            # The UID just changed; authentication frames must carry the new one,
+            # otherwise every later auth fails.
+            if len(card.uid) == 4:
+                card.uid = block0[0:4]
             # A second identical write tells us whether the card locks after one
             # (FUID / locked UFUID) or accepts repeated writes (CUID / Gen1A).
             if magic == "gen1a":
@@ -133,7 +181,7 @@ def write_card(pn532: PN532, card: Card, dump: bytes,
                 ok2, _ = write_block0_gen1a(pn532, card, block0)
             else:
                 ok2, _ = write_block0_gen2(pn532, card, by_sector, block0)
-            note += " / 可反复写" if ok2 else " / 已锁定,只能写一次"
+            note += ",可反复写" if ok2 else ",卡已锁定,只能写这一次"
         reports.append(WriteReport(0, 0, ok, note))
         if progress:
             progress(reports[-1])
@@ -143,7 +191,8 @@ def write_card(pn532: PN532, card: Card, dump: bytes,
         sk = by_sector.get(sector)
         if not sk or not sk.key:
             for block in list(geo.data_blocks(sector)) + [geo.trailer_block(sector)]:
-                reports.append(WriteReport(sector, block, False, "密钥未识别,已跳过"))
+                reports.append(WriteReport(sector, block, False, "密钥未识别,已跳过",
+                                           skipped=True))
             continue
         if not _auth(pn532, card, sector, by_sector):
             for block in list(geo.data_blocks(sector)) + [geo.trailer_block(sector)]:
@@ -151,14 +200,22 @@ def write_card(pn532: PN532, card: Card, dump: bytes,
             continue
 
         trailer_block = geo.trailer_block(sector)
-        trailer = dump[trailer_block * 16:(trailer_block + 1) * 16]
-        problem = check_access_bits(trailer)
-        if problem:
-            reports.append(WriteReport(sector, trailer_block, False, problem))
-            continue
+        blocks = list(geo.data_blocks(sector))
+        if write_trailers:
+            trailer = dump[trailer_block * 16:(trailer_block + 1) * 16]
+            problem = check_access_bits(trailer)
+            if problem:
+                for block in [*geo.data_blocks(sector), trailer_block]:
+                    reports.append(WriteReport(sector, block, False,
+                                               f"扇区未写:{problem}", skipped=True))
+                continue
+            # Trailer goes last so a failure cannot lock the sector mid-write.
+            blocks.append(trailer_block)
+        else:
+            reports.append(WriteReport(sector, trailer_block, False,
+                                       "尾块未写(保留目标卡密钥)", skipped=True))
 
-        # Trailer goes last so a failure cannot lock the sector mid-write.
-        for block in list(geo.data_blocks(sector)) + [trailer_block]:
+        for block in blocks:
             if block == 0 and write_uid and magic:
                 continue  # already handled
             data = dump[block * 16:(block + 1) * 16]
@@ -168,9 +225,18 @@ def write_card(pn532: PN532, card: Card, dump: bytes,
                 reports.append(WriteReport(sector, block, False, str(exc)))
                 if progress:
                     progress(reports[-1])
+                rest = blocks[blocks.index(block) + 1:]
+                for skipped_block in rest:
+                    reports.append(WriteReport(sector, skipped_block, False,
+                                               "前一块失败,未执行", skipped=True))
                 break
             note = ""
-            if ok and not verify_block(pn532, card, block, by_sector, data):
+            if ok and write_trailers and block == trailer_block:
+                # The trailer just re-keyed the sector, so verify with the keys
+                # that were written instead of the ones we authenticated with.
+                if not verify_trailer(pn532, card, sector, data):
+                    ok, note = False, "尾块写入后新密钥回读失败"
+            elif ok and not verify_block(pn532, card, block, by_sector, data):
                 ok, note = False, "写入后回读不一致"
             reports.append(WriteReport(sector, block, ok, note))
             if progress:
