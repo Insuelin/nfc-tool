@@ -6,10 +6,12 @@ Then open http://127.0.0.1:8770
 
 from __future__ import annotations
 
+import functools
 import json
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -22,7 +24,17 @@ ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
 
 DEFAULT_PORT = "COM3"
-DEFAULT_ENGINE_DIR = "D:/NFCX"
+# Built from tools/src by tools/build.sh; see README.
+DEFAULT_ENGINE_DIR = str(ROOT / "tools" / "bin")
+
+
+def device_op(fn):
+    """Hold the device lock for one phone-book operation, never blocking a request."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self.device_lock(blocking=False):
+            return fn(self, *args, **kwargs)
+    return wrapper
 
 
 class App:
@@ -37,15 +49,26 @@ class App:
         self.engine_dir = DEFAULT_ENGINE_DIR
         self.jobs: dict[str, dict] = {}
         self.busy = False
+        # Polled by the page while a long read is in flight.
+        self.progress = {"stage": "idle", "done": 0, "total": 0}
 
     # -- device ----------------------------------------------------
+
+    @contextmanager
+    def device_lock(self, blocking: bool = False):
+        if not self.lock.acquire(blocking=blocking):
+            raise RuntimeError("读卡器忙,上一个操作还没结束")
+        try:
+            yield
+        finally:
+            self.lock.release()
 
     @property
     def device(self) -> str:
         return f"pn532_uart:{self.port}:115200"
 
     def connect(self, port: str | None = None) -> dict:
-        with self.lock:
+        with self.device_lock(blocking=False):
             if port:
                 self.port = port
             if self.nfc:
@@ -60,7 +83,7 @@ class App:
             return {"ok": True, "firmware": f"v{ver}.{rev}", "port": self.port}
 
     def disconnect(self) -> dict:
-        with self.lock:
+        with self.device_lock(blocking=False):
             if self.nfc:
                 self.nfc.close()
             self.nfc = None
@@ -74,6 +97,7 @@ class App:
             raise RuntimeError("尚未连接读卡器")
         return self.nfc
 
+    @device_op
     def read_card(self) -> dict:
         nfc = self.require_device()
         card = None
@@ -116,36 +140,55 @@ class App:
             "verdict": verdict,
         }
 
+    @device_op
     def read_full(self) -> dict:
         """One click: identify, classify, scan keys and dump the whole card."""
-        card = self.read_card()
-        nfc = self.require_device()
-        assert self.card is not None
-        self.keys = mifare.scan_all(nfc, self.card)
-        self.keys_uid = self.card.uid
-        keys = [{"sector": k.sector, "known": k.known, "label": k.label,
-                 "key": k.key.hex().upper() if k.key else ""} for k in self.keys]
-        self.dump = mifare.dump_card(nfc, self.card)
-        return {
-            "card": card,
-            "keys": keys,
-            "dump": self.dump.hex().upper() if self.dump else "",
-            "size": len(self.dump) if self.dump else 0,
-        }
+        self.progress.update(stage="identify", done=0, total=0)
+        try:
+            card = self.read_card()
+            nfc = self.require_device()
+            assert self.card is not None
 
+            def on_key(sk, done, total):
+                self.progress.update(stage="keys", done=done, total=total)
+
+            self.keys = mifare.scan_all(nfc, self.card, progress=on_key)
+            self.keys_uid = self.card.uid
+            keys = [{"sector": k.sector, "known": k.known, "label": k.label,
+                     "key": k.key.hex().upper() if k.key else ""} for k in self.keys]
+            self.progress.update(stage="dump", done=0, total=0)
+            self.dump = mifare.dump_card(nfc, self.card)
+            return {
+                "card": card,
+                "keys": keys,
+                "dump": self.dump.hex().upper() if self.dump else "",
+                "size": len(self.dump) if self.dump else 0,
+            }
+        finally:
+            self.progress.update(stage="idle", done=0, total=0)
+
+    @device_op
     def scan_keys(self) -> dict:
         nfc = self.require_device()
         if not self.card:
             self.read_card()
         assert self.card is not None
-        self.keys = mifare.scan_all(nfc, self.card)
-        self.keys_uid = self.card.uid
+
+        def on_key(sk, done, total):
+            self.progress.update(stage="keys", done=done, total=total)
+
+        try:
+            self.keys = mifare.scan_all(nfc, self.card, progress=on_key)
+            self.keys_uid = self.card.uid
+        finally:
+            self.progress.update(stage="idle", done=0, total=0)
         return {"keys": [
             {"sector": k.sector, "known": k.known, "label": k.label,
              "key": k.key.hex().upper() if k.key else ""}
             for k in self.keys
         ]}
 
+    @device_op
     def read_dump(self) -> dict:
         nfc = self.require_device()
         if not self.card:
@@ -157,6 +200,7 @@ class App:
         return {"dump": self.dump.hex().upper() if self.dump else "",
                 "size": len(self.dump) if self.dump else 0}
 
+    @device_op
     def writability(self) -> dict:
         nfc = self.require_device()
         if not self.card:
@@ -168,6 +212,7 @@ class App:
         clone.reselect(nfc, self.card)
         return {"result": label, "note": note}
 
+    @device_op
     def classify(self) -> dict:
         nfc = self.require_device()
         if not self.card:
@@ -214,6 +259,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path in ("/", "/index.html"):
+            if "?" in self.path:
+                # Drop any query string so the address bar stays clean.
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             self._send(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
             return
         if path.startswith("/web/"):
@@ -237,6 +289,9 @@ class Handler(BaseHTTPRequestHandler):
                 "dump_size": len(APP.dump) if APP.dump else 0,
                 "engine_dir": APP.engine_dir,
             })
+            return
+        if path == "/api/progress":
+            self._json(APP.progress)
             return
         if path.startswith("/api/job/"):
             job = APP.jobs.get(path.rsplit("/", 1)[-1])
@@ -306,11 +361,18 @@ class Handler(BaseHTTPRequestHandler):
         return {"job": job_id}
 
     def _run_crack(self, job: dict, engine_name: str):
+        APP.lock.acquire()
         APP.busy = True
-        out = engines.scratch_dir() / "recovered.mfd"
         try:
+            out = engines.scratch_dir() / "recovered.mfd"
             if not APP.nfc:
                 raise RuntimeError("尚未连接读卡器")
+            if (engine_name == "mfcuk" and APP.card and APP.keys
+                    and APP.keys_uid == APP.card.uid
+                    and all(k.known for k in APP.keys)):
+                raise RuntimeError(
+                    "这张卡所有扇区的密钥都已经识别,不需要 darkside。"
+                    "直接读卡或改用 mfoc 导出即可")
             known = [k.key for k in APP.keys if k.key]
             APP.disconnect()  # external tools need the port exclusively
             self._log(job, f"device released, starting {engine_name}")
@@ -351,6 +413,7 @@ class Handler(BaseHTTPRequestHandler):
             job["state"] = "done"
             job["finished"] = time.time()
             APP.busy = False
+            APP.lock.release()
 
     def start_clone(self, body: dict) -> dict:
         if APP.busy:
@@ -360,6 +423,7 @@ class Handler(BaseHTTPRequestHandler):
         return {"job": job_id}
 
     def _run_clone(self, job: dict, body: dict):
+        APP.lock.acquire()
         APP.busy = True
         try:
             dump_hex = body.get("dump") or (APP.dump.hex() if APP.dump else "")
@@ -376,8 +440,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._log(job, f"目标卡密钥: {sum(1 for k in APP.keys if k.known)}/"
                                f"{len(APP.keys)} 扇区")
 
+            if not any(k.known for k in APP.keys):
+                raise RuntimeError("这张卡没有识别出任何密钥,先破解再写")
+
             magic = body.get("magic") or None
             write_uid = bool(body.get("write_uid"))
+            write_trailers = bool(body.get("write_trailers"))
+            self._log(job, f"写入目标卡 {APP.card.uid.hex().upper()}"
+                           f",块 0 {'写' if write_uid else '不写'}"
+                           f",扇区尾块 {'写(会改密钥)' if write_trailers else '不写'}")
 
             def progress(rep):
                 self._log(job, f"sector {rep.sector:2d} block {rep.block:2d} "
@@ -385,13 +456,30 @@ class Handler(BaseHTTPRequestHandler):
 
             reports = clone.write_card(
                 nfc, APP.card, dump, APP.keys,
-                write_uid=write_uid, magic=magic, progress=progress)
+                write_uid=write_uid, magic=magic,
+                write_trailers=write_trailers, progress=progress)
             ok = sum(1 for r in reports if r.ok)
+            skipped = sum(1 for r in reports if r.skipped)
+            failed = len(reports) - ok - skipped
+            reasons: dict[str, int] = {}
+            for r in reports:
+                if not r.ok and not r.skipped:
+                    key = r.note or "未说明原因"
+                    reasons[key] = reasons.get(key, 0) + 1
             block0 = next((r for r in reports if r.block == 0 and r.sector == 0), None)
-            job["result"] = {"ok": ok == len(reports), "written": ok, "total": len(reports),
+            job["result"] = {"ok": failed == 0, "written": ok, "skipped": skipped,
+                             "failed": failed, "total": len(reports),
+                             "reasons": reasons,
+                             "target_uid": APP.card.uid.hex().upper(),
+                             "keys": [{"sector": k.sector, "known": k.known,
+                                       "label": k.label,
+                                       "key": k.key.hex().upper() if k.key else ""}
+                                      for k in APP.keys],
                              "block0": block0.note if block0 else None,
                              "block0_ok": bool(block0 and block0.ok)}
-            self._log(job, f"written {ok}/{len(reports)} blocks")
+            self._log(job, f"结果:成功 {ok} 块,失败 {failed} 块,跳过 {skipped} 块")
+            for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
+                self._log(job, f"  失败原因 {n} 块:{reason}")
             if block0:
                 self._log(job, f"block0: {block0.note}")
         except Exception as exc:  # noqa: BLE001
@@ -401,6 +489,7 @@ class Handler(BaseHTTPRequestHandler):
             job["state"] = "done"
             job["finished"] = time.time()
             APP.busy = False
+            APP.lock.release()
 
 
 def main() -> None:
