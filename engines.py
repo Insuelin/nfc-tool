@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 
@@ -55,18 +56,26 @@ class Engine:
             bufsize=1,
         )
         lines: list[str] = []
-        try:
+
+        def reader() -> None:
             assert proc.stdout is not None
             for line in proc.stdout:
-                lines.append(line.rstrip("\n"))
+                text = line.rstrip("\n")
+                lines.append(text)
                 if on_line:
-                    on_line(line.rstrip("\n"))
+                    on_line(text)
+
+        pump = threading.Thread(target=reader, daemon=True)
+        pump.start()
+        try:
+            # wait() is the real timeout: a silent child still gets killed.
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
             raise EngineError(f"{self.name} timed out after {timeout:.0f}s")
         finally:
+            pump.join(timeout=1.0)
             if proc.stdout:
                 proc.stdout.close()
         return proc.returncode, "\n".join(lines)
@@ -91,8 +100,10 @@ class Mfcuk(Engine):
 
     def darkside(self, out_path: Path, sector: int = 0, timeout: float = 900.0,
                  on_line=None):
-        # -C connects, -R recovers, -O writes the extended dump.
-        args = ["-C", "-R", f"{sector}:A", "-s", "250", "-S", "250", "-O", str(out_path)]
+        # -C connects, -R recovers, -O writes the extended dump. Leave the
+        # field delays at their defaults (10/50 ms); the old 250/250 made the
+        # verify phase take minutes per sector.
+        args = ["-C", "-R", f"{sector}:A", "-O", str(out_path)]
         return self.run(args, timeout, on_line)
 
 
@@ -109,11 +120,31 @@ class Hardnested(Engine):
         return self.run(args, timeout, on_line)
 
 
-KEY_LINE = re.compile(r"Found Key ([A-Fa-f0-9]{12})", re.I)
+# mfoc / mfoc-hardnested: "Found Key: A [a0a1a2a3a4a5]"
+# mfcuk:                  "INFO: block 0 recovered KEY: a0a1a2a3a4a5"
+#                         "    key: a0a1a2a3a4a5"
+KEY_PATTERNS = (
+    # mfoc: "[Key: ffffffffffff] -> [...]" is a *tried* key, so only the
+    # explicit "Found Key: A [..]" line counts.
+    re.compile(r"Found Key:\s*[AB]\s*\[([0-9A-Fa-f]{12})\]", re.I),
+    # mfcuk: "INFO: block 0 recovered KEY: ..." and "    key: ..." at line start.
+    re.compile(r"recovered KEY:\s*([0-9A-Fa-f]{12})", re.I),
+    re.compile(r"^[ \t]+key:\s*([0-9A-Fa-f]{12})[ \t]*$", re.I | re.M),
+    # mfoc with -O prints the key it authenticated with for every saved block:
+    # "Block 03, type A, key 000000000000 :..."
+    re.compile(r"^Block\s+\d+,\s*type\s+[AB],\s*key\s+([0-9A-Fa-f]{12})\b",
+               re.I | re.M),
+)
 
 
 def found_keys(text: str) -> list[bytes]:
-    return [bytes.fromhex(m) for m in KEY_LINE.findall(text)]
+    seen: list[bytes] = []
+    for pattern in KEY_PATTERNS:
+        for match in pattern.findall(text):
+            key = bytes.fromhex(match)
+            if key not in seen:
+                seen.append(key)
+    return seen
 
 
 def parse_dump(path: Path) -> bytes:
