@@ -119,6 +119,26 @@
   input[type=checkbox]:checked { background: var(--accent); border-color: var(--accent); }
   #port { width: 6.5rem; }
   select { width: 100%; }
+  select.sx { display: none; }
+
+  /* 自绘下拉:原生 select 只用来存值,弹层由我们自己画 */
+  .pick { position: relative; display: flex; align-items: center; width: 100%;
+          padding: 4px 26px 4px 8px; font-size: 12px; color: var(--text);
+          background: #0d0f13; border: 1px solid var(--line-2); cursor: pointer;
+          user-select: none; }
+  .pick:hover, .pick.open, .pick:focus-visible { border-color: var(--accent); outline: none; }
+  .pick-arrow { position: absolute; right: 9px; top: 50%; width: 0; height: 0;
+                border-left: 5px solid transparent; border-right: 5px solid transparent;
+                border-top: 6px solid var(--muted); transform: translateY(-50%); }
+  .pick.open .pick-arrow { transform: translateY(-50%) rotate(180deg); border-top-color: var(--accent); }
+  .pick-menu { position: fixed; z-index: 70; min-width: 8rem;
+               background: #10131a; border: 1px solid var(--line-2);
+               box-shadow: 0 10px 24px rgba(0,0,0,.6); }
+  .pick-item { padding: 6px 9px; font-size: 12px; color: var(--text); cursor: pointer;
+               border-bottom: 1px solid rgba(255,255,255,.04); }
+  .pick-item:last-child { border-bottom: 0; }
+  .pick-item:hover { background: rgba(242,163,60,.14); color: var(--accent); }
+  .pick-item.on { color: var(--accent); background: rgba(242,163,60,.07); }
   label { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin: 6px 0 3px; }
 
   .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 7px; }
@@ -142,8 +162,10 @@
          font-family: var(--mono); font-size: 10.5px; margin-bottom: 3px; }
   .key.unknown { border-left-color: #3a3f46; color: var(--dim); background: transparent; }
 
-  .table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain;
-                margin-top: 8px; border-top: 1px solid var(--line); }
+  .table-wrap { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto;
+                overscroll-behavior: contain; margin-top: 8px; border-top: 1px solid var(--line); }
+  .empty-hint { position: absolute; inset: 0; display: flex; align-items: center;
+                justify-content: center; color: var(--dim); font-size: 12px; }
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
   th { position: sticky; top: 0; z-index: 1; text-align: left; font-weight: 500; font-size: 9px;
        letter-spacing: .18em; color: var(--dim); background: var(--panel); padding: 5px 6px;
@@ -263,12 +285,7 @@
             <span class="bw p"><button id="btnReadTarget" class="btn p" disabled>读目标卡</button></span>
           </div>
           <label><input type="checkbox" id="writeUid" checked> 连块 0 一起写(改 UID)</label>
-          <label for="magic">克隆卡类型</label>
-          <select id="magic">
-            <option value="">不写块 0</option>
-            <option value="gen1a">UID (Gen1A,0x40/0x43 后门)</option>
-            <option value="gen2">CUID (Gen2,普通写入)</option>
-          </select>
+          <label><input type="checkbox" id="writeTrailers"> 同时写扇区尾块(会改目标卡密钥,可能锁卡)</label>
           <div class="row">
             <span class="bw d"><button id="btnWrite" class="btn d" disabled>写入到当前卡片</button></span>
           </div>
@@ -279,11 +296,14 @@
       <div class="frame" id="secCrack"><section class="panel">
         <div class="p-head"><span class="p-title">破解</span><span class="p-latin">RECOVER</span></div>
         <div class="p-body">
-          <select id="engine">
+          <select id="engine" class="sx">
             <option value="mfoc">mfoc (Nested)</option>
             <option value="mfcuk">mfcuk (Darkside)</option>
             <option value="hardnested">mfoc-hardnested (Hardnested)</option>
           </select>
+          <div id="enginePick" class="pick" tabindex="0">
+            <span class="pick-label"></span><span class="pick-arrow"></span>
+          </div>
           <div class="row t0"><button id="btnCrack" class="btn" disabled>开始破解</button></div>
           <p class="note" id="crackTarget">当前卡片:—</p>
         </div>
@@ -298,7 +318,6 @@
           <div class="row t0">
             <button id="keyTabSrc" class="btn tab-on">源卡</button>
             <button id="keyTabDst" class="btn">目标卡</button>
-            <button id="btnScan" class="btn" disabled>识别密钥</button>
           </div>
           <div id="keys"></div>
         </div>
@@ -319,6 +338,7 @@
             <input id="fileInput" type="file" accept=".mfd,.bin,.dump" class="hidden">
           </div>
           <div class="table-wrap">
+            <div id="dumpEmpty" class="empty-hint">源卡 · 空</div>
             <table id="dumpTable">
               <thead><tr><th>BLK</th><th>HEX</th><th>ASCII</th></tr></thead>
               <tbody></tbody>
@@ -360,7 +380,7 @@
 const $ = (s) => document.querySelector(s);
 const state = { connected: false, card: false, dump: "", targetDump: "",
                 dumpSize: 0, targetSize: 0, view: "src", active: "src",
-                keysSrc: [], keysDst: [], uidSrc: "", uidDst: "", busy: false };
+                keysSrc: [], keysDst: [], uidSrc: "", uidDst: "", magic: "", busy: false };
 const buffer = () => (state.view === "src" ? state.dump : state.targetDump);
 const bufferSize = () => (state.view === "src" ? state.dumpSize : state.targetSize);
 
@@ -375,7 +395,6 @@ function syncUI() {
   $('#btnDisconnect').disabled = !state.connected || state.busy;
   $('#btnRead').disabled = !state.connected || state.busy;
   $('#btnReadTarget').disabled = !state.connected || state.busy;
-  $('#btnScan').disabled = !state.card || state.busy;
   $('#btnCrack').disabled = !state.connected || state.busy;
   $('#btnWrite').disabled = !state.dump || state.busy;
   $('#btnSaveDump').disabled = !buffer();
@@ -459,9 +478,12 @@ function renderTable() {
   const tbody = $('#dumpTable tbody');
   tbody.innerHTML = '';
   if (!hex) {
-    $('#dumpInfo').textContent = state.view === "src" ? "源卡 · 空" : "目标卡 · 未读取";
+    $('#dumpInfo').textContent = state.view === "src" ? "源卡" : "目标卡";
+    $('#dumpEmpty').style.display = "flex";
+    $('#dumpEmpty').textContent = state.view === "src" ? "源卡 · 空" : "目标卡 · 未读取";
     return;
   }
+  $('#dumpEmpty').style.display = "none";
   const bytes = hex.match(/../g).map((h) => parseInt(h, 16));
   const blocks = bytes.length / 16;
   for (let b = 0; b < blocks; b++) {
@@ -507,18 +529,32 @@ async function pollJob(id) {
   syncUI();
   if (job.kind === 'clone') {
     const res = job.result || {};
+    // The backend may have rescanned the target card; show the keys it used.
+    if (res.keys && res.keys.length) setKeys('dst', res.keys);
+    if (res.target_uid) log(`目标卡 UID:${res.target_uid}`);
     if (res.block0) {
       $('#verdict').classList.remove('hidden');
       $('#verdictLine').textContent = `块 0:${res.block0}`;
       log(`块 0:${res.block0}`);
     }
+    // 写入结果按 成功 / 失败 / 跳过 分开报,别再拿一个总数当分母。
+    const counts = [`成功 ${res.written || 0} 块`];
+    if (res.failed) counts.push(`失败 ${res.failed} 块`);
+    if (res.skipped) counts.push(`跳过 ${res.skipped} 块(密钥没识别出来)`);
+    const why = Object.entries(res.reasons || {})
+      .sort((a, b) => b[1] - a[1]).slice(0, 3)
+      .map(([k, n]) => `${k} ×${n}`);
+    const summary = counts.join(' · ')
+      + (why.length ? `\n失败原因:${why.join('、')}` : '')
+      + (res.block0 ? `\n块 0:${res.block0}` : '');
     if (res.error) {
       showDialog('写入失败', res.error);
     } else if (!res.ok) {
-      showDialog('写入未完成', `成功 ${res.written || 0}/${res.total || 0} 块`
-        + (res.block0 ? `\n块 0:${res.block0}` : ''));
+      showDialog('写入未完成', summary);
+    } else if (res.skipped) {
+      showDialog('写入完成', summary);
     } else {
-      log(`写入完成 ${res.written}/${res.total} 块`);
+      log(`写入完成:${counts.join(' · ')}`);
     }
   }
   if (job.kind.startsWith('crack')) {
@@ -537,7 +573,6 @@ async function pollJob(id) {
         if (r.card.verdict) {
           renderVerdict(r.card.verdict.kind, r.card.verdict.rewritable,
                         r.card.verdict.evidence, r.card.verdict.confidence);
-          autoMagic(r.card.verdict.kind);
         }
         log(`破解后已更新${slot === 'src' ? '源卡' : '目标卡'}的密钥与数据`);
       }
@@ -571,7 +606,36 @@ $('#btnDisconnect').addEventListener('click', async () => {
   syncUI();
 });
 
+// 读卡时轮询后端进度,别让人对着黑屏等 25 秒。
+let progressTimer = 0;
+function startProgress(label) {
+  stopProgress();
+  status(label);
+  progressTimer = setInterval(async () => {
+    try {
+      const p = await fetch('/api/progress').then((r) => r.json());
+      if (p.stage === 'keys' && p.total) status(`${label}密钥 ${p.done}/${p.total}`);
+      else if (p.stage === 'dump') status(`${label}读取数据…`);
+      else if (p.stage === 'identify') status(`${label}识别卡片…`);
+    } catch {}
+  }, 300);
+}
+function stopProgress() {
+  if (progressTimer) clearInterval(progressTimer);
+  progressTimer = 0;
+}
+async function restoreStatus() {
+  try {
+    const s = await api('/api/status');
+    status(s.connected ? `已连接 ${s.port} PN532 ${s.firmware || ''}` : '未连接',
+           s.connected ? 'on' : '');
+  } catch {}
+}
+
 $('#btnRead').addEventListener('click', async () => {
+  state.busy = true; syncUI();
+  log('读卡中…(密钥多的卡要点时间)');
+  startProgress('读卡中… ');
   try {
     const r = await api('/api/read_full', {});
     renderCard(r.card);
@@ -581,14 +645,18 @@ $('#btnRead').addEventListener('click', async () => {
     if (r.card.verdict) {
       renderVerdict(r.card.verdict.kind, r.card.verdict.rewritable,
                     r.card.verdict.evidence, r.card.verdict.confidence);
-      autoMagic(r.card.verdict.kind);
     }
     const known = r.keys.filter((k) => k.known).length;
     log(`读到源卡 ${r.card.uid}:密钥 ${known}/${r.keys.length},数据 ${r.size} 字节`);
-  } catch (e) { log('读卡失败: ' + e.message); state.card = false; syncUI(); }
+  } catch (e) { log('读卡失败: ' + e.message); state.card = false; }
+  stopProgress(); restoreStatus();
+  state.busy = false; syncUI();
 });
 
 $('#btnReadTarget').addEventListener('click', async () => {
+  state.busy = true; syncUI();
+  log('读目标卡中…');
+  startProgress('读目标卡… ');
   try {
     const r = await api('/api/read_full', {});
     renderCard(r.card);
@@ -598,11 +666,12 @@ $('#btnReadTarget').addEventListener('click', async () => {
     if (r.card.verdict) {
       renderVerdict(r.card.verdict.kind, r.card.verdict.rewritable,
                     r.card.verdict.evidence, r.card.verdict.confidence);
-      autoMagic(r.card.verdict.kind);
     }
     const known = r.keys.filter((k) => k.known).length;
     log(`读到目标卡 ${r.card.uid}:密钥 ${known}/${r.keys.length},数据 ${r.size} 字节`);
-  } catch (e) { log('读第二张卡失败: ' + e.message); }
+  } catch (e) { log('读目标卡失败: ' + e.message); }
+  stopProgress(); restoreStatus();
+  state.busy = false; syncUI();
 });
 
 $('#tabSrc').addEventListener('click', () => setView("src"));
@@ -610,17 +679,81 @@ $('#tabDst').addEventListener('click', () => setView("dst"));
 $('#keyTabSrc').addEventListener('click', () => setView("src"));
 $('#keyTabDst').addEventListener('click', () => setView("dst"));
 
-function autoMagic(kind) {
-  const sel = $('#magic');
-  if (kind.startsWith('UID')) sel.value = 'gen1a';
-  else if (/CUID|FUID|UFUID/.test(kind)) sel.value = 'gen2';
-  else sel.value = '';
+function makePick(selectEl, pickEl) {
+  const label = pickEl.querySelector('.pick-label');
+  const menu = document.createElement('div');
+  menu.className = 'pick-menu';
+  menu.hidden = true;
+  document.body.appendChild(menu);
+
+  const items = [...selectEl.options].map((opt, i) => {
+    const item = document.createElement('div');
+    item.className = 'pick-item';
+    item.textContent = opt.textContent;
+    item.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      selectEl.selectedIndex = i;
+      selectEl.dispatchEvent(new Event('change'));
+      sync();
+      close();
+    });
+    menu.appendChild(item);
+    return item;
+  });
+
+  function sync() {
+    const idx = selectEl.selectedIndex;
+    label.textContent = selectEl.options[idx] ? selectEl.options[idx].textContent : '';
+    items.forEach((el, i) => el.classList.toggle('on', i === idx));
+  }
+  function open() {
+    menu.hidden = false;
+    pickEl.classList.add('open');
+    const r = pickEl.getBoundingClientRect();
+    menu.style.minWidth = r.width + 'px';
+    menu.style.left = Math.max(8, Math.min(r.left, innerWidth - r.width - 8)) + 'px';
+    menu.style.top = (r.bottom + 2) + 'px';
+    const mr = menu.getBoundingClientRect();
+    if (r.bottom + 2 + mr.height > innerHeight - 8) {
+      menu.style.top = Math.max(8, r.top - mr.height - 2) + 'px';
+    }
+  }
+  function close() { menu.hidden = true; pickEl.classList.remove('open'); }
+
+  pickEl.addEventListener('click', () => { if (menu.hidden) open(); else close(); });
+  pickEl.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); if (menu.hidden) open(); else close(); }
+    if (ev.key === 'Escape') close();
+  });
+  document.addEventListener('click', (ev) => {
+    if (!pickEl.contains(ev.target) && !menu.contains(ev.target)) close();
+  });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
+  window.addEventListener('resize', close);
+  sync();
+  return { sync };
 }
 
+const picks = {
+  engine: makePick($('#engine'), $('#enginePick')),
+};
+
+// 判定里的 rewritable 说的是块 0(UID 所在块)能改写几次,不是整卡能复制几次。
+const REWRITE_TEXT = {
+  '多次': '块 0 可反复写',
+  '一次': '块 0 只能写一次',
+  '不可写': '块 0 不可写',
+  '待写入测试': '块 0 改写能力待写入测试',
+  '未知': '块 0 改写能力未知',
+};
+
 function renderVerdict(kind, rewritable, evidence, confidence) {
+  state.magic = kind.startsWith('UID') ? 'gen1a'
+    : (/CUID|FUID|UFUID/.test(kind) ? 'gen2' : '');
   $('#verdict').classList.remove('hidden');
-  $('#verdictLine').textContent = `${kind} · 次数 ${rewritable}`;
-  $('#popTitle').textContent = `${kind} · 次数 ${rewritable} · 置信度 ${confidence}`;
+  const label = `${kind} · ${REWRITE_TEXT[rewritable] || rewritable}`;
+  $('#verdictLine').textContent = label;
+  $('#popTitle').textContent = `${label} · 置信度 ${confidence}`;
   const ul = $('#evidenceList');
   ul.innerHTML = '';
   (evidence || []).forEach((line) => {
@@ -763,17 +896,6 @@ $('#dlgCancel').addEventListener('click', () => closeDialog(false));
 $('#dlgClose').addEventListener('click', () => closeDialog(false));
 $('#dialogBack').addEventListener('click', (ev) => { if (ev.target.id === 'dialogBack') closeDialog(false); });
 
-$('#btnScan').addEventListener('click', async () => {
-  state.busy = true; syncUI();
-  log('识别密钥中…');
-  try {
-    const r = await api('/api/scan', {});
-    setKeys(state.active, r.keys);
-    log(`密钥识别完成(${state.active === 'src' ? '源卡' : '目标卡'}): ${r.keys.filter((k) => k.known).length}/${r.keys.length}`);
-  } catch (e) { log('识别失败: ' + e.message); }
-  state.busy = false; syncUI();
-});
-
 $('#btnCrack').addEventListener('click', async () => {
   state.busy = true; syncUI();
   try {
@@ -786,10 +908,19 @@ $('#btnCrack').addEventListener('click', async () => {
 
 $('#btnWrite').addEventListener('click', async () => {
   if (!state.dump) { log('缓冲区为空,请先读卡或加载文件'); return; }
+  const dstKeys = state.keysDst || [];
+  if (dstKeys.length && !dstKeys.some((k) => k.known)) {
+    showDialog('没有密钥',
+      '这张卡没有识别出任何密钥,先破解再写。\n\n'
+      + '现在密钥栏是 0/' + dstKeys.length + ',一个扇区都认证不了,写进去也是全跳过。'
+      + '先用「破解」拿到密钥,再回来写。');
+    return;
+  }
   const writeUid = $('#writeUid').checked;
-  const magic = $('#magic').value || null;
+  const writeTrailers = $('#writeTrailers').checked;
+  const magic = state.magic || null;
   if (writeUid && !magic) {
-    showDialog('缺少卡类型', '要写块 0,请先在下面选择克隆卡类型。');
+    showDialog('缺少卡类型', '无法判断这张卡怎么改 UID。请先点「读目标卡」,让程序完成类型判定。');
     return;
   }
   const blocks = state.dump.length / 32;
@@ -797,12 +928,15 @@ $('#btnWrite').addEventListener('click', async () => {
     `目标卡 UID:${$('#cUid').textContent}\n`
     + `写入 ${blocks} 块`
     + (writeUid ? `,含块 0(${magic === 'gen1a' ? 'UID Gen1A' : 'CUID Gen2'})` : ',不写块 0')
+    + (writeTrailers ? ',含扇区尾块(会改密钥)' : ',不写扇区尾块(目标卡密钥保持不变)')
     + '\n\n写入会覆盖卡片内容,不可撤销。FUID 的块 0 只有一次机会。');
   if (!ok) return;
   state.busy = true; syncUI();
   log('开始写入…');
   try {
-    const r = await api('/api/clone', { dump: state.dump, write_uid: writeUid, magic });
+    const r = await api('/api/clone', {
+      dump: state.dump, write_uid: writeUid, magic, write_trailers: writeTrailers,
+    });
     if (r.error) { log(r.error); state.busy = false; syncUI(); return; }
     pollJob(r.job);
   } catch (e) { log('写入失败: ' + e.message); state.busy = false; syncUI(); }
