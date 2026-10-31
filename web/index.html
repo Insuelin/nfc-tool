@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFC 工作台</title>
+<style>
+  :root {
+    --bg: #0b0c0e; --panel: #14161a;
+    --line: rgba(255,255,255,.10); --line-2: rgba(255,255,255,.18);
+    --text: #dcdcd8; --muted: #8a8f96; --dim: #6c7178;
+    --accent: #f2a33c; --danger: #e2504a;
+    --mono: ui-monospace, Consolas, "Cascadia Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; color: var(--text); background-color: var(--bg);
+    background-image:
+      linear-gradient(rgba(255,255,255,.022) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.022) 1px, transparent 1px);
+    background-size: 26px 26px, 26px 26px;
+    font: 400 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  /* 网点:右下角装饰,渐变淡出,不与扫描线重叠 */
+  body::before {
+    content: ""; position: fixed; right: -50px; bottom: -50px; width: 320px; height: 320px;
+    background-image: radial-gradient(rgba(242,163,60,.55) 1px, transparent 1.5px);
+    background-size: 7px 7px;
+    -webkit-mask-image: radial-gradient(circle at 72% 72%, #000 0%, transparent 68%);
+    mask-image: radial-gradient(circle at 72% 72%, #000 0%, transparent 68%);
+    opacity: .16; pointer-events: none; z-index: 0;
+  }
+
+  /* 顶栏:扫描线只在这里 */
+  .topbar {
+    position: relative; flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
+    padding: 11px 16px; border-bottom: 1px solid var(--line-2); background: #0e1013; z-index: 2;
+  }
+  .topbar::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,.045) 0 1px, transparent 1px 3px);
+  }
+  .topbar > * { position: relative; z-index: 1; }
+  .brand { font-size: 14px; font-weight: 700; letter-spacing: .26em; }
+  .brand span { color: var(--accent); }
+  .pill {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+    padding: 3px 9px; border: 1px solid var(--line-2); color: var(--muted);
+  }
+  .pill.on { border-color: var(--accent); color: var(--accent); }
+  .pill.err { border-color: var(--danger); color: var(--danger); }
+  .tag {
+    margin-left: auto; font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+    padding: 3px 9px; border: 1px solid var(--line); color: var(--muted);
+  }
+  .hazard { flex: 0 0 auto; height: 3px;
+    background: repeating-linear-gradient(45deg, var(--accent) 0 7px, transparent 7px 15px);
+    opacity: .5; }
+
+  main { flex: 1 1 auto; min-height: 0; display: grid; gap: 10px; padding: 10px;
+         grid-template-columns: minmax(16rem, 22rem) minmax(13rem, 18rem) minmax(0, 1fr);
+         grid-template-rows: minmax(0, 1fr) clamp(7rem, 24vh, 12rem);
+         grid-template-areas: "left keys data" "left log log";
+         z-index: 1; }
+  .col-left { grid-area: left; }
+  .col-keys { grid-area: keys; }
+  .col-data { grid-area: data; }
+  .log-area { grid-area: log; display: flex; }
+  .log-frame > .panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .col { min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+  .col.scroll { overflow-y: auto; overscroll-behavior: contain;
+                scrollbar-width: none; }
+  .col.scroll::-webkit-scrollbar { width: 0; height: 0; }
+
+  .frame { padding: 1px; background: var(--line);
+    clip-path: polygon(0 0, calc(100% - 11px) 0, 100% 11px, 100% 100%, 11px 100%, 0 calc(100% - 11px)); }
+  .frame.grow { flex: 1 1 auto; min-height: 0; display: flex; }
+  .frame.grow > .panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .frame.dim { opacity: .45; }
+  .panel { background: var(--panel); padding: 9px 11px;
+    clip-path: polygon(0 0, calc(100% - 11px) 0, 100% 11px, 100% 100%, 11px 100%, 0 calc(100% - 11px)); }
+
+  .p-head { display: flex; align-items: center; gap: 8px; padding-bottom: 6px;
+            border-bottom: 1px solid rgba(255,255,255,.09); }
+  .p-head::before { content: ""; width: 3px; height: 11px; background: var(--accent); }
+  .p-title { font-size: 13px; font-weight: 600; letter-spacing: .06em; }
+  .p-latin { margin-left: auto; font-family: var(--mono); font-size: 9px;
+             letter-spacing: .18em; color: var(--dim); }
+  .p-body { padding-top: 8px; display: flex; flex-direction: column; min-height: 0; }
+  .p-body.fill { flex: 1 1 auto; }
+
+  .bw { display: inline-block; padding: 1px; background: var(--line-2);
+        clip-path: polygon(0 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%);
+        margin-right: 6px; }
+  .bw.p { background: var(--accent); }
+  .bw.d { background: rgba(226,80,74,.55); }
+  .bw:has(.btn:disabled) { opacity: .35; }
+  .btn { display: inline-block; border: 0; cursor: pointer; font: inherit; font-size: 11px;
+         padding: 5px 12px; background: #12141a; color: var(--text); letter-spacing: .1em;
+         clip-path: polygon(0 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%); }
+  .btn:hover:not(:disabled) { background: #1b1f26; }
+  .btn.p { background: var(--accent); color: #0b0c0d; font-weight: 600; }
+  .btn.p:hover:not(:disabled) { background: #ffb456; }
+  .btn.d { color: var(--danger); }
+  .btn.d:hover:not(:disabled) { background: rgba(226,80,74,.12); }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+  .btn.tab-on { color: var(--accent); background: rgba(242,163,60,.12); }
+
+  input[type=text], select {
+    font: inherit; font-size: 12px; color: var(--text); background: #0d0f13;
+    border: 1px solid var(--line-2); padding: 4px 8px; border-radius: 0;
+  }
+  input[type=text]:focus, select:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+  input[type=checkbox] { appearance: none; -webkit-appearance: none; flex: 0 0 auto;
+    width: 13px; height: 13px; margin: 0; cursor: pointer; position: relative;
+    border: 1px solid var(--line-2); background: #0d0f13; }
+  input[type=checkbox]:checked { background: var(--accent); border-color: var(--accent); }
+  #port { width: 6.5rem; }
+  select { width: 100%; }
+  label { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin: 6px 0 3px; }
+
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 7px; }
+  .row.t0 { margin-top: 0; }
+
+  dl { display: grid; grid-template-columns: 4.4rem 1fr; gap: 1px 8px; margin: 6px 0 0; font-size: 12px; }
+  dt { color: var(--dim); font-size: 11px; }
+  dd { margin: 0; font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+  dd.hot { color: var(--accent); }
+
+  .verdict { margin-top: 8px; font-size: 11px; color: var(--muted); }
+  .verdict b, .verdict #verdictLine { color: var(--accent); font-weight: 600; }
+  .link-btn { background: none; border: 0; padding: 0; margin-left: 6px; cursor: pointer;
+              color: var(--dim); font: inherit; font-size: 11px;
+              border-bottom: 1px solid var(--dim); }
+  .link-btn:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+  #keys { overflow-y: auto; overscroll-behavior: contain; min-height: 0; flex: 1 1 auto; margin-top: 8px; }
+  .key { display: flex; justify-content: space-between; gap: 8px; padding: 3px 7px;
+         border-left: 2px solid var(--accent); background: rgba(255,255,255,.03);
+         font-family: var(--mono); font-size: 10.5px; margin-bottom: 3px; }
+  .key.unknown { border-left-color: #3a3f46; color: var(--dim); background: transparent; }
+
+  .table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain;
+                margin-top: 8px; border-top: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
+  th { position: sticky; top: 0; z-index: 1; text-align: left; font-weight: 500; font-size: 9px;
+       letter-spacing: .18em; color: var(--dim); background: var(--panel); padding: 5px 6px;
+       border-bottom: 1px solid var(--line-2); }
+  td { padding: 2.5px 6px; border-bottom: 1px solid rgba(255,255,255,.05); white-space: nowrap; }
+  td:first-child { color: var(--accent); }
+  tr.trailer td:not(:first-child) { color: var(--dim); }
+  tr.uid td:first-child { color: #ffcf8a; }
+  tr:hover td { background: rgba(255,255,255,.032); }
+  .ascii { color: var(--dim); }
+
+  .log { flex: 1 1 auto; min-height: 5rem; overflow: auto; margin-top: 7px; padding: 6px 8px;
+         background: #0a0c0f; border: 1px solid rgba(255,255,255,.06);
+         font-family: var(--mono); font-size: 10.5px; color: var(--muted); white-space: pre-wrap; }
+
+  .hint { font-size: 11px; color: var(--dim); margin: 0 0 7px; }
+  .note { font-size: 10.5px; color: var(--dim); margin: 6px 0 0; }
+  .warn { color: #c98a3a; }
+  .hidden { display: none; }
+
+  /* 浮窗:唯一使用阴影的层 */
+  .popover { position: fixed; z-index: 60; max-width: 22rem; max-height: 45vh; overflow: auto;
+             background: #10131a; border: 1px solid var(--line-2); padding: 8px 10px;
+             font-size: 11px; color: var(--text); box-shadow: 0 10px 28px rgba(0,0,0,.6);
+             clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 9px 100%, 0 calc(100% - 9px)); }
+  .pop-title { color: var(--accent); margin-bottom: 5px; font-family: var(--mono); font-size: 10px; letter-spacing: .08em; }
+  .popover ul { margin: 0; padding-left: 1rem; color: var(--muted); }
+  .popover li { margin: .12rem 0; }
+
+  .dialog-back { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 80;
+                 display: flex; align-items: center; justify-content: center; }
+  .dialog-back.hidden { display: none; }
+  .dialog { width: min(26rem, 90vw); padding: 1px; background: var(--line-2);
+            box-shadow: 0 18px 48px rgba(0,0,0,.6);
+            clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px)); }
+  .dialog > div { background: #11141a; padding: 12px 14px;
+            clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px)); }
+  .d-head { display: flex; align-items: center; gap: 8px; padding-bottom: 8px;
+            border-bottom: 1px solid rgba(255,255,255,.09); }
+  .d-title { font-size: 13px; font-weight: 600; color: var(--accent); }
+  .d-close { margin-left: auto; background: none; border: 0; color: var(--dim);
+             font-size: 16px; cursor: pointer; line-height: 1; }
+  .d-body { font-size: 12px; color: var(--text); padding: 10px 0 4px; line-height: 1.6;
+            white-space: pre-wrap; }
+  .d-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 8px; }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* 缩放适配:列宽用 rem 上下限,窄到放不下时改为纵向堆叠并允许整页滚动 */
+  @media (max-width: 1180px) {
+    body { overflow: auto; }
+    main { grid-template-columns: 1fr; grid-template-rows: none;
+           grid-template-areas: "left" "keys" "data" "log"; }
+    .col.scroll { overflow: visible; }
+    .frame.grow { flex: 0 0 auto; }
+    .log-area { min-height: 9rem; }
+    #keys { max-height: 40vh; }
+    .table-wrap { max-height: 55vh; }
+    .log { max-height: 40vh; min-height: 8rem; }
+  }
+  @media (max-height: 720px) {
+    .topbar { padding: 7px 12px; }
+    main { padding: 8px; gap: 8px; }
+    .panel { padding: 7px 9px; }
+    .log-frame { flex-basis: clamp(6rem, 20vh, 9rem); }
+  }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">NFC<span>·</span>工作台</div>
+    <span id="status" class="pill">未连接</span>
+    <span id="fw" class="tag"></span>
+  </header>
+  <div class="hazard"></div>
+
+  <main>
+    <!-- 左栏 -->
+    <div class="col scroll col-left">
+      <div class="frame" id="secConnect"><section class="panel">
+        <div class="p-head"><span class="p-title">连接读卡器</span><span class="p-latin">LINK</span></div>
+        <div class="p-body">
+          <div class="row t0">
+            <input id="port" type="text" value="COM3" title="串口">
+            <span class="bw p"><button id="btnConnect" class="btn p">连接</button></span>
+            <button id="btnDisconnect" class="btn" disabled>断开</button>
+          </div>
+        </div>
+      </section></div>
+
+      <div class="frame" id="secCard"><section class="panel">
+        <div class="p-head"><span class="p-title">读卡</span><span class="p-latin">CARD READ</span></div>
+        <div class="p-body">
+          <div class="row t0">
+            <span class="bw p"><button id="btnRead" class="btn p" disabled>读卡</button></span>
+          </div>
+          <dl>
+            <dt>UID</dt><dd id="cUid" class="hot">—</dd>
+            <dt>ATQA</dt><dd id="cAtqa">—</dd>
+            <dt>SAK</dt><dd id="cSak">—</dd>
+            <dt>卡型</dt><dd id="cType">—</dd>
+            <dt>块 0</dt><dd id="cBlock0">—</dd>
+          </dl>
+        </div>
+      </section></div>
+
+      <div class="frame" id="secClone"><section class="panel">
+        <div class="p-head"><span class="p-title">复制</span><span class="p-latin">CLONE</span></div>
+        <div class="p-body">
+          <div id="verdict" class="verdict hidden" style="margin-top:0">
+            <span id="verdictLine"></span>
+            <button id="verdictMore" class="link-btn" type="button">更多信息</button>
+          </div>
+          <div class="row t0">
+            <span class="bw p"><button id="btnReadTarget" class="btn p" disabled>读目标卡</button></span>
+          </div>
+          <label><input type="checkbox" id="writeUid" checked> 连块 0 一起写(改 UID)</label>
+          <label for="magic">克隆卡类型</label>
+          <select id="magic">
+            <option value="">不写块 0</option>
+            <option value="gen1a">UID (Gen1A,0x40/0x43 后门)</option>
+            <option value="gen2">CUID (Gen2,普通写入)</option>
+          </select>
+          <div class="row">
+            <span class="bw d"><button id="btnWrite" class="btn d" disabled>写入到当前卡片</button></span>
+          </div>
+          <p class="note warn">块 0:FUID 一次机会;UFUID 锁定前可反复写。</p>
+        </div>
+      </section></div>
+
+      <div class="frame" id="secCrack"><section class="panel">
+        <div class="p-head"><span class="p-title">破解</span><span class="p-latin">RECOVER</span></div>
+        <div class="p-body">
+          <select id="engine">
+            <option value="mfoc">mfoc (Nested)</option>
+            <option value="mfcuk">mfcuk (Darkside)</option>
+            <option value="hardnested">mfoc-hardnested (Hardnested)</option>
+          </select>
+          <div class="row t0"><button id="btnCrack" class="btn" disabled>开始破解</button></div>
+          <p class="note" id="crackTarget">当前卡片:—</p>
+        </div>
+      </section></div>
+    </div>
+
+    <!-- 中栏 -->
+    <div class="col col-keys">
+      <div class="frame grow" id="secKeys"><section class="panel">
+        <div class="p-head"><span class="p-title">密钥</span><span id="keyCount" class="p-latin">KEYS</span></div>
+        <div class="p-body fill">
+          <div class="row t0">
+            <button id="keyTabSrc" class="btn tab-on">源卡</button>
+            <button id="keyTabDst" class="btn">目标卡</button>
+            <button id="btnScan" class="btn" disabled>识别密钥</button>
+          </div>
+          <div id="keys"></div>
+        </div>
+      </section></div>
+    </div>
+
+    <!-- 右栏 -->
+    <div class="col col-data">
+      <div class="frame grow"><section class="panel">
+        <div class="p-head"><span class="p-title">数据</span><span id="dumpInfo" class="p-latin">DATA</span></div>
+        <div class="p-body fill">
+          <div class="row t0">
+            <button id="tabSrc" class="btn tab-on">源卡</button>
+            <button id="tabDst" class="btn">目标卡</button>
+            <span style="flex:1"></span>
+            <button id="btnSaveDump" class="btn" disabled>保存</button>
+            <button id="btnLoadDump" class="btn">加载</button>
+            <input id="fileInput" type="file" accept=".mfd,.bin,.dump" class="hidden">
+          </div>
+          <div class="table-wrap">
+            <table id="dumpTable">
+              <thead><tr><th>BLK</th><th>HEX</th><th>ASCII</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section></div>
+
+    </div>
+
+    <div class="frame log-frame log-area"><section class="panel">
+      <div class="p-head"><span class="p-title">日志</span><span class="p-latin">LOG</span></div>
+      <div class="p-body fill">
+        <div class="log" id="jobLog">日志会显示在这里</div>
+      </div>
+    </section></div>
+  </main>
+
+  <div id="verdictPop" class="popover hidden">
+    <div id="popTitle" class="pop-title"></div>
+    <ul id="evidenceList"></ul>
+  </div>
+
+  <div id="dialogBack" class="dialog-back hidden">
+    <div class="dialog"><div>
+      <div class="d-head">
+        <span id="dlgTitle" class="d-title"></span>
+        <button id="dlgClose" class="d-close" type="button">×</button>
+      </div>
+      <div id="dlgBody" class="d-body"></div>
+      <div class="d-foot">
+        <button id="dlgCancel" class="btn hidden">取消</button>
+        <button id="dlgOk" class="btn">确定</button>
+      </div>
+    </div></div>
+  </div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { connected: false, card: false, dump: "", targetDump: "",
+                dumpSize: 0, targetSize: 0, view: "src", active: "src",
+                keysSrc: [], keysDst: [], uidSrc: "", uidDst: "", busy: false };
+const buffer = () => (state.view === "src" ? state.dump : state.targetDump);
+const bufferSize = () => (state.view === "src" ? state.dumpSize : state.targetSize);
+
+function status(text, cls = '') {
+  const el = $('#status');
+  el.textContent = text;
+  el.className = 'pill' + (cls ? ' ' + cls : '');
+}
+
+function syncUI() {
+  $('#btnConnect').disabled = state.busy;
+  $('#btnDisconnect').disabled = !state.connected || state.busy;
+  $('#btnRead').disabled = !state.connected || state.busy;
+  $('#btnReadTarget').disabled = !state.connected || state.busy;
+  $('#btnScan').disabled = !state.card || state.busy;
+  $('#btnCrack').disabled = !state.connected || state.busy;
+  $('#btnWrite').disabled = !state.dump || state.busy;
+  $('#btnSaveDump').disabled = !buffer();
+  $('#port').disabled = state.connected || state.busy;
+  $('#secCard').classList.toggle('dim', !state.connected);
+  $('#secKeys').classList.toggle('dim', !state.card);
+  $('#secClone').classList.toggle('dim', !state.dump);
+  $('#secCrack').classList.toggle('dim', !state.card);
+}
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function log(line) {
+  const el = $('#jobLog');
+  const empty = el.textContent === '日志会显示在这里';
+  el.textContent = (empty ? '' : el.textContent + '\n') + line;
+  el.scrollTop = el.scrollHeight;
+}
+
+function renderCard(c) {
+  $('#cUid').textContent = c.uid || '—';
+  $('#cAtqa').textContent = c.atqa || '—';
+  $('#cSak').textContent = c.sak || '—';
+  $('#cType').textContent = c.type || '—';
+  $('#cBlock0').textContent = c.block0 || '—';
+  state.card = true;
+  syncUI();
+}
+
+const keysOf = (which) => (which === "src" ? state.keysSrc : state.keysDst);
+
+function setKeys(which, keys) {
+  if (which === "src") state.keysSrc = keys; else state.keysDst = keys;
+  if (which === state.view) renderKeys();
+}
+
+function renderKeys() {
+  const keys = keysOf(state.view);
+  const box = $('#keys');
+  box.innerHTML = '';
+  keys.forEach((k) => {
+    const d = document.createElement('div');
+    d.className = 'key ' + (k.known ? 'known' : 'unknown');
+    d.textContent = `${String(k.sector).padStart(2, '0')}  ${k.known ? k.label : '未识别'}`;
+    box.appendChild(d);
+  });
+  const known = keys.filter((k) => k.known).length;
+  $('#keyCount').textContent = keys.length ? `${known}/${keys.length}` : 'KEYS';
+}
+
+function markActive(which, uid) {
+  state.active = which;
+  if (uid !== undefined) {
+    if (which === "src") state.uidSrc = uid; else state.uidDst = uid;
+  }
+  const shown = which === "src" ? state.uidSrc : state.uidDst;
+  $('#crackTarget').textContent =
+    `当前卡片:${which === "src" ? "源卡" : "目标卡"}${shown ? " · UID " + shown : ""}`;
+}
+
+function setBuffer(which, hex, size) {
+  if (which === "src") { state.dump = hex; state.dumpSize = size; }
+  else { state.targetDump = hex; state.targetSize = size; }
+  state.view = which;
+  renderTable();
+  updateTabs();
+  syncUI();
+}
+
+function renderTable() {
+  const hex = buffer();
+  const tbody = $('#dumpTable tbody');
+  tbody.innerHTML = '';
+  if (!hex) {
+    $('#dumpInfo').textContent = state.view === "src" ? "源卡 · 空" : "目标卡 · 未读取";
+    return;
+  }
+  const bytes = hex.match(/../g).map((h) => parseInt(h, 16));
+  const blocks = bytes.length / 16;
+  for (let b = 0; b < blocks; b++) {
+    const row = bytes.slice(b * 16, b * 16 + 16);
+    const tr = document.createElement('tr');
+    tr.className = 'tr' + (b === 0 ? ' uid' : '') + (b % 4 === 3 ? ' trailer' : '');
+    const ascii = row.map((v) => (v >= 32 && v < 127 ? String.fromCharCode(v) : '.')).join('');
+    tr.innerHTML = `<td>${String(b).padStart(2, '0')}</td>
+      <td>${row.map((v) => v.toString(16).padStart(2, '0').toUpperCase()).join(' ')}</td>
+      <td class="ascii">${ascii}</td>`;
+    tbody.appendChild(tr);
+  }
+  const label = state.view === "src" ? "源卡" : "目标卡";
+  $('#dumpInfo').textContent = `${label} ${bufferSize()} 字节 / ${blocks} 块`;
+}
+
+function updateTabs() {
+  const src = state.view === "src";
+  $('#tabSrc').classList.toggle('tab-on', src);
+  $('#tabDst').classList.toggle('tab-on', !src);
+  $('#keyTabSrc').classList.toggle('tab-on', src);
+  $('#keyTabDst').classList.toggle('tab-on', !src);
+}
+
+function setView(which) {
+  state.view = which;
+  markActive(which);
+  renderTable();
+  renderKeys();
+  updateTabs();
+  syncUI();
+}
+
+async function pollJob(id) {
+  const job = await fetch(`/api/job/${id}`).then((r) => r.json());
+  $('#jobLog').textContent = job.logs.join('\n') || '运行中…';
+  $('#jobLog').scrollTop = $('#jobLog').scrollHeight;
+  if (job.state === 'running') {
+    setTimeout(() => pollJob(id), 700);
+    return;
+  }
+  state.busy = false;
+  syncUI();
+  if (job.kind === 'clone') {
+    const res = job.result || {};
+    if (res.block0) {
+      $('#verdict').classList.remove('hidden');
+      $('#verdictLine').textContent = `块 0:${res.block0}`;
+      log(`块 0:${res.block0}`);
+    }
+    if (res.error) {
+      showDialog('写入失败', res.error);
+    } else if (!res.ok) {
+      showDialog('写入未完成', `成功 ${res.written || 0}/${res.total || 0} 块`
+        + (res.block0 ? `\n块 0:${res.block0}` : ''));
+    } else {
+      log(`写入完成 ${res.written}/${res.total} 块`);
+    }
+  }
+  if (job.kind.startsWith('crack')) {
+    try {
+      const s = await api('/api/status');
+      state.connected = s.connected;
+      status(s.connected ? `已连接 ${s.port} ${s.firmware || ''}` : '未连接', s.connected ? 'on' : '');
+      syncUI();
+      if (s.connected) {
+        const slot = state.active;
+        const r = await api('/api/read_full', {});
+        renderCard(r.card);
+        setKeys(slot, r.keys);
+        markActive(slot, r.card.uid);
+        setBuffer(slot, r.dump, r.size);
+        if (r.card.verdict) {
+          renderVerdict(r.card.verdict.kind, r.card.verdict.rewritable,
+                        r.card.verdict.evidence, r.card.verdict.confidence);
+          autoMagic(r.card.verdict.kind);
+        }
+        log(`破解后已更新${slot === 'src' ? '源卡' : '目标卡'}的密钥与数据`);
+      }
+    } catch {}
+  }
+}
+
+$('#btnConnect').addEventListener('click', async () => {
+  const port = $('#port').value.trim() || 'COM3';
+  status('连接中…');
+  try {
+    const r = await api('/api/connect', { port });
+    state.connected = true;
+    status(`已连接 ${r.port} PN532 ${r.firmware}`, 'on');
+    $('#fw').textContent = `PN532 ${r.firmware} · ${r.port}`;
+    log(`已连接 ${r.port}`);
+  } catch (e) {
+    state.connected = false;
+    status('连接失败', 'err');
+    log('连接失败: ' + e.message);
+  }
+  syncUI();
+});
+
+$('#btnDisconnect').addEventListener('click', async () => {
+  try { await api('/api/disconnect', {}); } catch {}
+  state.connected = false; state.card = false; state.dump = '';
+  status('未连接');
+  $('#fw').textContent = '';
+  log('已断开');
+  syncUI();
+});
+
+$('#btnRead').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/read_full', {});
+    renderCard(r.card);
+    setKeys("src", r.keys);
+    markActive("src", r.card.uid);
+    setBuffer("src", r.dump, r.size);
+    if (r.card.verdict) {
+      renderVerdict(r.card.verdict.kind, r.card.verdict.rewritable,
+                    r.card.verdict.evidence, r.card.verdict.confidence);
+      autoMagic(r.card.verdict.kind);
+    }
+    const known = r.keys.filter((k) => k.known).length;
+    log(`读到源卡 ${r.card.uid}:密钥 ${known}/${r.keys.length},数据 ${r.size} 字节`);
+  } catch (e) { log('读卡失败: ' + e.message); state.card = false; syncUI(); }
+});
+
+$('#btnReadTarget').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/read_full', {});
+    renderCard(r.card);
+    setKeys("dst", r.keys);
+    markActive("dst", r.card.uid);
+    setBuffer("dst", r.dump, r.size);
+    if (r.card.verdict) {
+      renderVerdict(r.card.verdict.kind, r.card.verdict.rewritable,
+                    r.card.verdict.evidence, r.card.verdict.confidence);
+      autoMagic(r.card.verdict.kind);
+    }
+    const known = r.keys.filter((k) => k.known).length;
+    log(`读到目标卡 ${r.card.uid}:密钥 ${known}/${r.keys.length},数据 ${r.size} 字节`);
+  } catch (e) { log('读第二张卡失败: ' + e.message); }
+});
+
+$('#tabSrc').addEventListener('click', () => setView("src"));
+$('#tabDst').addEventListener('click', () => setView("dst"));
+$('#keyTabSrc').addEventListener('click', () => setView("src"));
+$('#keyTabDst').addEventListener('click', () => setView("dst"));
+
+function autoMagic(kind) {
+  const sel = $('#magic');
+  if (kind.startsWith('UID')) sel.value = 'gen1a';
+  else if (/CUID|FUID|UFUID/.test(kind)) sel.value = 'gen2';
+  else sel.value = '';
+}
+
+function renderVerdict(kind, rewritable, evidence, confidence) {
+  $('#verdict').classList.remove('hidden');
+  $('#verdictLine').textContent = `${kind} · 次数 ${rewritable}`;
+  $('#popTitle').textContent = `${kind} · 次数 ${rewritable} · 置信度 ${confidence}`;
+  const ul = $('#evidenceList');
+  ul.innerHTML = '';
+  (evidence || []).forEach((line) => {
+    const li = document.createElement('li');
+    li.textContent = line;
+    ul.appendChild(li);
+  });
+  hidePopover();
+}
+
+// --- hover popover with a safe triangle between trigger and panel ---
+const popState = { open: false, tri: null, timer: 0 };
+let lastPoint = { x: 0, y: 0 };
+
+const rectOf = (el) => el.getBoundingClientRect();
+const inRect = (p, r) => p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom;
+
+function inTriangle(p, tri) {
+  const [a, b, c] = tri;
+  const side = (p1, p2, p3) => (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y);
+  const d1 = side(p, a, b), d2 = side(p, b, c), d3 = side(p, c, a);
+  const neg = d1 < 0 || d2 < 0 || d3 < 0;
+  const pos = d1 > 0 || d2 > 0 || d3 > 0;
+  return !(neg && pos);
+}
+
+function nearestEdge(p, r) {
+  const edges = [
+    [{ x: r.left, y: r.top }, { x: r.right, y: r.top }],
+    [{ x: r.left, y: r.bottom }, { x: r.right, y: r.bottom }],
+    [{ x: r.left, y: r.top }, { x: r.left, y: r.bottom }],
+    [{ x: r.right, y: r.top }, { x: r.right, y: r.bottom }],
+  ];
+  let best = edges[0], bestD = Infinity;
+  for (const edge of edges) {
+    const mx = (edge[0].x + edge[1].x) / 2;
+    const my = (edge[0].y + edge[1].y) / 2;
+    const d = (mx - p.x) ** 2 + (my - p.y) ** 2;
+    if (d < bestD) { bestD = d; best = edge; }
+  }
+  return best;
+}
+
+function showPopover() {
+  const el = $('#verdictPop');
+  el.classList.remove('hidden');
+  const t = rectOf($('#verdictMore'));
+  const r = rectOf(el);
+  let x = t.left;
+  let y = t.bottom + 6;
+  if (y + r.height > innerHeight - 8) y = t.top - r.height - 6;
+  if (x + r.width > innerWidth - 8) x = innerWidth - r.width - 8;
+  el.style.left = Math.max(8, x) + 'px';
+  el.style.top = Math.max(8, y) + 'px';
+  popState.open = true;
+  popState.tri = null;
+}
+
+function hidePopover() {
+  $('#verdictPop').classList.add('hidden');
+  popState.open = false;
+  popState.tri = null;
+  cancelHide();
+}
+
+function cancelHide() {
+  if (popState.timer) { clearTimeout(popState.timer); popState.timer = 0; }
+}
+
+function scheduleHide() {
+  cancelHide();
+  popState.timer = setTimeout(() => {
+    if (!popState.open) return;
+    if (inRect(lastPoint, rectOf($('#verdictMore')))) return;
+    if (inRect(lastPoint, rectOf($('#verdictPop')))) return;
+    if (popState.tri && inTriangle(lastPoint, popState.tri)) return;
+    hidePopover();
+  }, 140);
+}
+
+$('#verdictMore').addEventListener('mouseenter', () => { cancelHide(); showPopover(); });
+
+$('#verdictMore').addEventListener('mouseleave', (ev) => {
+  if (!popState.open) return;
+  const p = { x: ev.clientX, y: ev.clientY };
+  popState.tri = [p, ...nearestEdge(p, rectOf($('#verdictPop')))];
+  scheduleHide();
+});
+
+$('#verdictPop').addEventListener('mouseenter', cancelHide);
+$('#verdictPop').addEventListener('mouseleave', () => scheduleHide());
+
+document.addEventListener('mousemove', (ev) => {
+  lastPoint = { x: ev.clientX, y: ev.clientY };
+  if (!popState.open) return;
+  cancelHide();
+  if (inRect(lastPoint, rectOf($('#verdictMore')))) return;
+  if (inRect(lastPoint, rectOf($('#verdictPop')))) return;
+  if (popState.tri && inTriangle(lastPoint, popState.tri)) return;
+  scheduleHide();
+});
+
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape') return;
+  hidePopover();
+  if (!$('#dialogBack').classList.contains('hidden')) closeDialog(false);
+});
+
+window.addEventListener('resize', hidePopover);
+window.addEventListener('blur', hidePopover);
+
+let dlgResolve = null;
+
+function showDialog(title, body) {
+  $('#dlgTitle').textContent = title;
+  $('#dlgBody').textContent = body;
+  $('#dlgCancel').classList.add('hidden');
+  $('#dialogBack').classList.remove('hidden');
+}
+
+function confirmDialog(title, body) {
+  return new Promise((resolve) => {
+    $('#dlgTitle').textContent = title;
+    $('#dlgBody').textContent = body;
+    $('#dlgCancel').classList.remove('hidden');
+    $('#dialogBack').classList.remove('hidden');
+    dlgResolve = resolve;
+  });
+}
+
+function closeDialog(result) {
+  $('#dialogBack').classList.add('hidden');
+  const resolve = dlgResolve;
+  dlgResolve = null;
+  if (resolve) resolve(result);
+}
+
+$('#dlgOk').addEventListener('click', () => closeDialog(true));
+$('#dlgCancel').addEventListener('click', () => closeDialog(false));
+$('#dlgClose').addEventListener('click', () => closeDialog(false));
+$('#dialogBack').addEventListener('click', (ev) => { if (ev.target.id === 'dialogBack') closeDialog(false); });
+
+$('#btnScan').addEventListener('click', async () => {
+  state.busy = true; syncUI();
+  log('识别密钥中…');
+  try {
+    const r = await api('/api/scan', {});
+    setKeys(state.active, r.keys);
+    log(`密钥识别完成(${state.active === 'src' ? '源卡' : '目标卡'}): ${r.keys.filter((k) => k.known).length}/${r.keys.length}`);
+  } catch (e) { log('识别失败: ' + e.message); }
+  state.busy = false; syncUI();
+});
+
+$('#btnCrack').addEventListener('click', async () => {
+  state.busy = true; syncUI();
+  try {
+    const r = await api('/api/crack', { engine: $('#engine').value });
+    if (r.error) { log(r.error); state.busy = false; syncUI(); return; }
+    log('任务已启动,读卡器交给外部程序…');
+    pollJob(r.job);
+  } catch (e) { log('启动失败: ' + e.message); state.busy = false; syncUI(); }
+});
+
+$('#btnWrite').addEventListener('click', async () => {
+  if (!state.dump) { log('缓冲区为空,请先读卡或加载文件'); return; }
+  const writeUid = $('#writeUid').checked;
+  const magic = $('#magic').value || null;
+  if (writeUid && !magic) {
+    showDialog('缺少卡类型', '要写块 0,请先在下面选择克隆卡类型。');
+    return;
+  }
+  const blocks = state.dump.length / 32;
+  const ok = await confirmDialog('确认写入',
+    `目标卡 UID:${$('#cUid').textContent}\n`
+    + `写入 ${blocks} 块`
+    + (writeUid ? `,含块 0(${magic === 'gen1a' ? 'UID Gen1A' : 'CUID Gen2'})` : ',不写块 0')
+    + '\n\n写入会覆盖卡片内容,不可撤销。FUID 的块 0 只有一次机会。');
+  if (!ok) return;
+  state.busy = true; syncUI();
+  log('开始写入…');
+  try {
+    const r = await api('/api/clone', { dump: state.dump, write_uid: writeUid, magic });
+    if (r.error) { log(r.error); state.busy = false; syncUI(); return; }
+    pollJob(r.job);
+  } catch (e) { log('写入失败: ' + e.message); state.busy = false; syncUI(); }
+});
+
+$('#btnSaveDump').addEventListener('click', () => {
+  const hexData = buffer();
+  if (!hexData) return;
+  const bytes = new Uint8Array(hexData.match(/../g).map((h) => parseInt(h, 16)));
+  const blob = new Blob([bytes], { type: 'application/octet-stream' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'card-' + ($('#cUid').textContent || 'dump') + '.mfd';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+$('#btnLoadDump').addEventListener('click', () => $('#fileInput').click());
+$('#fileInput').addEventListener('change', async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const hex = Array.from(buf).map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+  setBuffer(state.view, hex, buf.length);
+  log('已加载 ' + file.name + ' (' + buf.length + ' 字节) → ' + (state.view === 'src' ? '源卡' : '目标卡'));
+});
+
+(async () => {
+  try {
+    const s = await api('/api/status');
+    state.connected = s.connected;
+    if (s.connected) {
+      status(`已连接 ${s.port} ${s.firmware || ''}`, 'on');
+      $('#fw').textContent = `PN532 ${s.firmware || ''} · ${s.port}`;
+    }
+  } catch { status('服务未响应', 'err'); }
+  syncUI();
+})();
+</script>
+</body>
+</html>
