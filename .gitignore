@@ -4,6 +4,9 @@ __pycache__/
 *.mfd
 *.bin
 
+# 本地笔记 / 截图,不进仓库
+docs/
+
 # external crack tools: built from tools/src, never committed
 tools/src/
 tools/bin/
