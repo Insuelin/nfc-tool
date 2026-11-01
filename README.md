@@ -1,5 +1,7 @@
 # nfc-tool
 
+中文 | [English](README.en.md)
+
 本地 PN532 读卡工作台。Python 直接实现 PN532 的 HSU 串口协议，不依赖 libnfc 就能读卡；浏览器页面负责操作，跑在 `127.0.0.1`。Windows 自用。
 
 ## 支持的读卡器
