@@ -20,7 +20,7 @@ mfcuk 的模板目录 `data/` 必须和 `mfcuk.exe` 放在一起,否则启动时
 - MSYS2(`C:\msys64`),mingw-w64 gcc 16、cmake、ninja
 - 只装了 64 位工具链
 
-## 对上游源码的两处补丁
+## 对上游源码的三处补丁
 
 1. **libnfc `CMakeLists.txt`**:上游在 Windows 主机上强制 `-m32`,本机没有 32 位工具链,删掉这几行,改成 64 位。
 2. **mfoc `src/mfoc.h` / `src/mfoc.c`**:`usage(FILE *, int errno)` 的参数名 `errno` 在 Windows 上会被宏展开,改成 `exitcode`。

@@ -8,6 +8,8 @@
 | mfcuk | 0.3.8 | GPL-2.0-or-later | darkside 攻击 |
 | mfoc-hardnested | 0.10.9 | GPL-2.0-or-later | hardnested 攻击 |
 | libnfc | 1.8.0 | LGPL-3.0-or-later | 上面三个程序的运行时依赖（`libnfc.dll`） |
+| liblzma | 5.8.4 | 0BSD（部分文件 GPLv2 / 公有领域） | mfoc-hardnested 的运行时依赖（`liblzma-5.dll`），随 MSYS2 的 xz 包 |
+| libwinpthread | mingw-w64 | MIT | mingw-w64 运行时依赖（`libwinpthread-1.dll`） |
 | crypto1_bs | — | MIT（两个文件为 GPLv2） | hardnested 暴力破解代码来源 |
 | crapto1 | — | GPL-2.0-or-later | Crypto1 算法，随 mfoc / mfoc-hardnested 源码 |
 | nfc-mfsetuid | 1.8.0 | BSD-2-Clause | 改 MIFARE 1K 的 UID，本工具没有调用 |
@@ -34,5 +36,4 @@
 - GPL-2.0-or-later 的部分：给对应源码（含自己打的补丁）、GPLv2 全文、版权声明；改过的文件要标出来改了哪里；给构建/安装脚本；别加跟 GPL 冲突的 EULA。不想带源码的话，至少给三年有效的书面获取要约。
 - LGPL-3.0 的 libnfc：带 LGPLv3/GPLv3 文本，醒目声明用了 libnfc，给 libnfc 源码，并保证用户能换成自己改过的 `libnfc.dll`。改成静态链接的话要提供能重新链接的材料。
 - mfoc 是 GPL-2.0-or-later、libnfc 是 LGPL-3.0，最稳的做法是把这俩的组合按 GPL-3.0 分发。
-- BSD-2 的 nfc-mfsetuid：分发时保留版权声明、两条条件和免责声明。
-- 自己的 Python 代码继续 MIT，但目录和许可证文件分开，别把整个包标成 MIT-only。
+- **BSD-2 的 nfc-mfsetuid**：本工具没有编译也没有调用它；万一以后打包进来，保留版权声明、两条条件和免责声明。
