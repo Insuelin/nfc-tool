@@ -4,6 +4,8 @@
 
 A local PN532 card workstation. Python speaks the PN532 HSU serial protocol directly, so reading a card does not require libnfc; a browser page drives it on `127.0.0.1`. Windows only, personal use.
 
+![UI](assets/screenshot.png)
+
 ## Supported readers
 
 - PN532 module in HSU/UART mode (tested over a CH340 USB-serial adapter, v1.6 firmware)
